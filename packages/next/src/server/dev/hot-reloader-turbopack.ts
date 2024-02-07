@@ -44,6 +44,7 @@ import {
   MIDDLEWARE_REACT_LOADABLE_MANIFEST,
   MIDDLEWARE_BUILD_MANIFEST,
   INTERCEPTION_ROUTE_REWRITE_MANIFEST,
+  BLOCKED_PAGES,
 } from '../../shared/lib/constants'
 import { getOverlayMiddleware } from 'next/dist/compiled/@next/react-dev-overlay/dist/middleware-turbopack'
 import { mkdir, readFile, writeFile } from 'fs/promises'
@@ -93,6 +94,9 @@ import {
   type ServerFields,
   type SetupOpts,
 } from '../lib/router-utils/setup-dev-bundler'
+import getAssetPathFromRoute from '../../shared/lib/router/utils/get-asset-path-from-route'
+import { findPagePathData } from './on-demand-entry-handler'
+import type { RouteDefinition } from '../future/route-definitions/route-definition'
 
 const MILLISECONDS_IN_NANOSECOND = 1_000_000
 const wsServer = new ws.Server({ noServer: true })
@@ -271,7 +275,12 @@ export async function createHotReloaderTurbopack(
     serverAddr: `127.0.0.1:${opts.port}`,
   })
   const iter = project.entrypointsSubscribe()
+
+  // pathname -> route
   const curEntries: Map<string, Route> = new Map()
+  // originalName / page -> route
+  const curAppEntries: Map<string, Route> = new Map()
+
   const changeSubscriptions: Map<
     string,
     Promise<AsyncIterator<any>>
@@ -434,25 +443,17 @@ export async function createHotReloaderTurbopack(
       | `${typeof NEXT_FONT_MANIFEST}.json`
       | typeof REACT_LOADABLE_MANIFEST,
     pageName: string,
-    type:
-      | 'pages'
-      | 'app'
-      | 'app-route'
-      | 'middleware'
-      | 'instrumentation' = 'pages'
+    type: 'pages' | 'app' | 'middleware' | 'instrumentation' = 'pages'
   ): Promise<T> {
     const manifestPath = posix.join(
       distDir,
       `server`,
-      type === 'app-route' ? 'app' : type,
+      type,
       type === 'middleware' || type === 'instrumentation'
         ? ''
-        : pageName === '/'
-        ? 'index'
-        : pageName === '/index' || pageName.startsWith('/index/')
-        ? `/index${pageName}`
-        : pageName,
-      type === 'app' ? 'page' : type === 'app-route' ? 'route' : '',
+        : type === 'app'
+        ? pageName
+        : getAssetPathFromRoute(pageName),
       name
     )
     return JSON.parse(await readFile(posix.join(manifestPath), 'utf-8')) as T
@@ -471,7 +472,7 @@ export async function createHotReloaderTurbopack(
 
   async function loadMiddlewareManifest(
     pageName: string,
-    type: 'pages' | 'app' | 'app-route' | 'middleware' | 'instrumentation'
+    type: 'pages' | 'app' | 'middleware' | 'instrumentation'
   ): Promise<void> {
     middlewareManifests.set(
       pageName,
@@ -503,13 +504,10 @@ export async function createHotReloaderTurbopack(
     )
   }
 
-  async function loadAppPathManifest(
-    pageName: string,
-    type: 'app' | 'app-route' = 'app'
-  ): Promise<void> {
+  async function loadAppPathManifest(pageName: string): Promise<void> {
     appPathsManifests.set(
       pageName,
-      await loadPartialManifest(APP_PATHS_MANIFEST, pageName, type)
+      await loadPartialManifest(APP_PATHS_MANIFEST, pageName, 'app')
     )
   }
 
@@ -839,14 +837,18 @@ export async function createHotReloaderTurbopack(
         globalEntries.error = entrypoints.pagesErrorEndpoint
 
         curEntries.clear()
+        curAppEntries.clear()
 
         for (const [pathname, route] of entrypoints.routes) {
           switch (route.type) {
             case 'page':
             case 'page-api':
+              curEntries.set(pathname, route)
+              break
             case 'app-page':
             case 'app-route': {
               curEntries.set(pathname, route)
+              curAppEntries.set(route.originalName, route)
               break
             }
             default:
@@ -856,14 +858,16 @@ export async function createHotReloaderTurbopack(
         }
 
         for (const [pathname, subscriptionPromise] of changeSubscriptions) {
-          if (pathname === '') {
+          const rawPathname = pathname.replace(/ \((?:client|server)\)$/, '')
+
+          if (rawPathname === '') {
             // middleware is handled below
             continue
           }
 
-          if (!curEntries.has(pathname)) {
+          if (!curEntries.has(rawPathname) && !curAppEntries.has(rawPathname)) {
             const subscription = await subscriptionPromise
-            subscription.return?.()
+            await subscription.return?.()
             changeSubscriptions.delete(pathname)
           }
         }
@@ -1021,6 +1025,7 @@ export async function createHotReloaderTurbopack(
 
   async function handleRouteType(
     page: string,
+    pathname: string,
     route: Route,
     requestUrl: string | undefined
   ) {
@@ -1029,7 +1034,7 @@ export async function createHotReloaderTurbopack(
     try {
       switch (route.type) {
         case 'page': {
-          finishBuilding = startBuilding(page, requestUrl)
+          finishBuilding = startBuilding(pathname, requestUrl)
           try {
             if (globalEntries.app) {
               const writtenEndpoint = await handleRequireCacheClearing(
@@ -1112,7 +1117,7 @@ export async function createHotReloaderTurbopack(
           break
         }
         case 'page-api': {
-          finishBuilding = startBuilding(page, requestUrl)
+          finishBuilding = startBuilding(pathname, requestUrl)
           const writtenEndpoint = await handleRequireCacheClearing(
             page,
             await route.endpoint.writeToDisk()
@@ -1135,7 +1140,7 @@ export async function createHotReloaderTurbopack(
           break
         }
         case 'app-page': {
-          finishBuilding = startBuilding(page, requestUrl)
+          finishBuilding = startBuilding(pathname, requestUrl)
           const writtenEndpoint = await handleRequireCacheClearing(
             page,
             await route.htmlEndpoint.writeToDisk()
@@ -1170,7 +1175,7 @@ export async function createHotReloaderTurbopack(
 
           await loadAppBuildManifest(page)
           await loadBuildManifest(page, 'app')
-          await loadAppPathManifest(page, 'app')
+          await loadAppPathManifest(page)
           await loadActionManifest(page)
           await loadFontManifest(page, 'app')
           await writeManifests()
@@ -1180,7 +1185,7 @@ export async function createHotReloaderTurbopack(
           break
         }
         case 'app-route': {
-          finishBuilding = startBuilding(page, requestUrl)
+          finishBuilding = startBuilding(pathname, requestUrl)
           const writtenEndpoint = await handleRequireCacheClearing(
             page,
             await route.endpoint.writeToDisk()
@@ -1188,9 +1193,9 @@ export async function createHotReloaderTurbopack(
 
           const type = writtenEndpoint?.type
 
-          await loadAppPathManifest(page, 'app-route')
+          await loadAppPathManifest(page)
           if (type === 'edge') {
-            await loadMiddlewareManifest(page, 'app-route')
+            await loadMiddlewareManifest(page, 'app')
           } else {
             middlewareManifests.delete(page)
           }
@@ -1402,10 +1407,25 @@ export async function createHotReloaderTurbopack(
       isApp,
       url: requestUrl,
     }) {
-      const page = definition?.pathname ?? inputPage
+      if (inputPage !== '/_error' && BLOCKED_PAGES.indexOf(inputPage) !== -1) {
+        return
+      }
+
+      let routeDef: Pick<RouteDefinition, 'filename' | 'bundlePath' | 'page'> =
+        definition ??
+        (await findPagePathData(
+          dir,
+          inputPage,
+          nextConfig.pageExtensions,
+          opts.pagesDir,
+          opts.appDir
+        ))
+
+      const page = routeDef.page
+      const pathname = definition?.pathname ?? inputPage
 
       if (page === '/_error') {
-        let finishBuilding = startBuilding(page, requestUrl)
+        let finishBuilding = startBuilding(pathname, requestUrl)
         try {
           if (globalEntries.app) {
             const writtenEndpoint = await handleRequireCacheClearing(
@@ -1453,14 +1473,13 @@ export async function createHotReloaderTurbopack(
         }
         return
       }
+
       await currentEntriesHandling
-      const route =
-        curEntries.get(page) ??
-        curEntries.get(
-          normalizeAppPath(
-            normalizeMetadataRoute(definition?.page ?? inputPage)
-          )
-        )
+      const route = definition?.pathname
+        ? curEntries.get(definition!.pathname)
+        : isApp
+        ? curAppEntries.get(page)
+        : curEntries.get(page)
 
       if (!route) {
         // TODO: why is this entry missing in turbopack?
@@ -1481,7 +1500,7 @@ export async function createHotReloaderTurbopack(
         throw new Error(`mis-matched route type: isApp && page for ${page}`)
       }
 
-      await handleRouteType(page, route, requestUrl)
+      await handleRouteType(page, pathname, route, requestUrl)
     },
   }
 
