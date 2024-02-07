@@ -143,7 +143,7 @@ function navigateReducer_noPPR(
   return data.then(
     ([flightData, canonicalUrlOverride]) => {
       // we only want to mark this once
-      if (prefetchValues && !prefetchValues.lastUsedTime) {
+      if (!prefetchValues.lastUsedTime) {
         // important: we should only mark the cache node as dirty after we unsuspend from the call above
         prefetchValues.lastUsedTime = Date.now()
       }
@@ -196,7 +196,7 @@ function navigateReducer_noPPR(
             currentCache,
             cache,
             flightDataPath,
-            prefetchValues?.kind === 'auto' &&
+            prefetchValues.kind === 'auto' &&
               prefetchEntryCacheStatus === PrefetchCacheEntryStatus.reusable
           )
 
@@ -312,7 +312,7 @@ function navigateReducer_PPR(
   return data.then(
     ([flightData, canonicalUrlOverride, _postponed]) => {
       // we only want to mark this once
-      if (prefetchValues && !prefetchValues.lastUsedTime) {
+      if (!prefetchValues.lastUsedTime) {
         // important: we should only mark the cache node as dirty after we unsuspend from the call above
         prefetchValues.lastUsedTime = Date.now()
       }
@@ -449,7 +449,7 @@ function navigateReducer_PPR(
               currentCache,
               cache,
               flightDataPath,
-              prefetchValues?.kind === 'auto' &&
+              prefetchValues.kind === 'auto' &&
                 prefetchEntryCacheStatus === PrefetchCacheEntryStatus.reusable
             )
 
