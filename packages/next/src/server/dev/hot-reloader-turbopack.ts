@@ -28,7 +28,6 @@ import {
   getVersionInfo,
   matchNextPageBundleRequest,
 } from './hot-reloader-webpack'
-import { normalizeAppPath } from '../../shared/lib/router/utils/app-paths'
 import { isInterceptionRouteRewrite } from '../../lib/generate-interception-routes-rewrites'
 import { store as consoleStore } from '../../build/output/store'
 
@@ -61,7 +60,6 @@ import {
   deleteAppClientCache,
   deleteCache,
 } from '../../build/webpack/plugins/nextjs-require-cache-hot-reloader'
-import { normalizeMetadataRoute } from '../../lib/metadata/get-metadata-route'
 import {
   clearModuleContext,
   clearAllModuleContexts,
@@ -845,7 +843,14 @@ export async function createHotReloaderTurbopack(
             case 'page-api':
               curEntries.set(pathname, route)
               break
-            case 'app-page':
+            case 'app-page': {
+              curEntries.set(pathname, route)
+              // ideally we wouldn't put the whole route in here
+              route.pages.forEach((page) => {
+                curAppEntries.set(page.originalName, route)
+              })
+              break
+            }
             case 'app-route': {
               curEntries.set(pathname, route)
               curAppEntries.set(route.originalName, route)
@@ -869,6 +874,12 @@ export async function createHotReloaderTurbopack(
             const subscription = await subscriptionPromise
             await subscription.return?.()
             changeSubscriptions.delete(pathname)
+          }
+        }
+
+        for (const [page] of issues) {
+          if (!curEntries.has(page)) {
+            issues.delete(page)
           }
         }
 
@@ -1140,17 +1151,20 @@ export async function createHotReloaderTurbopack(
           break
         }
         case 'app-page': {
+          const pageRoute =
+            route.pages.find((p) => p.originalName === page) ?? route.pages[0]
+
           finishBuilding = startBuilding(pathname, requestUrl)
           const writtenEndpoint = await handleRequireCacheClearing(
             page,
-            await route.htmlEndpoint.writeToDisk()
+            await pageRoute.htmlEndpoint.writeToDisk()
           )
 
           changeSubscription(
             page,
             'server',
             true,
-            route.rscEndpoint,
+            pageRoute.rscEndpoint,
             (_page, change) => {
               if (change.issues.some((issue) => issue.severity === 'error')) {
                 // Ignore any updates that has errors
@@ -1549,7 +1563,7 @@ export async function createHotReloaderTurbopack(
         default:
       }
     }
-  })()
+  })().catch(() => {})
 
   return hotReloader
 }
